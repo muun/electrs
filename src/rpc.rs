@@ -4,7 +4,9 @@ use bitcoin_hashes::hex::{FromHex, ToHex};
 use bitcoin_hashes::sha256d::Hash as Sha256dHash;
 use error_chain::ChainedError;
 use hex;
-use serde_json::{from_str, Value};
+use serde_json::{from_str, Number, Value};
+use serde_json::Value::Array;
+use serde_json::Value::Object;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -380,6 +382,29 @@ impl Connection {
         Ok(())
     }
 
+    fn extract_and_handle_command(&mut self, cmd: &Value) -> Result<Value> {
+        let empty_params = json!([]);
+        return match (cmd.get("method"),
+                      cmd.get("params").unwrap_or_else(|| &empty_params), 
+                      cmd.get("id")) {
+            (
+                Some(&Value::String(ref method)),
+                &Value::Array(ref params),
+                Some(ref id),
+            ) => self.handle_command(method, params, id),
+            _ => bail!("invalid command: {}", cmd),
+        };
+    }
+
+    fn handle_batch(&mut self, cmds: &[Value]) -> Result<Value> {
+        let mut results: Vec<Value> = Vec::with_capacity(cmds.len());
+        for cmd in cmds {
+            let res = self.extract_and_handle_command(&cmd)?;
+            results.push(res);
+        }
+        Ok(Array(results))
+    }
+
     fn handle_replies(&mut self) -> Result<()> {
         let empty_params = json!([]);
         loop {
@@ -388,16 +413,9 @@ impl Connection {
             match msg {
                 Message::Request(line) => {
                     let cmd: Value = from_str(&line).chain_err(|| "invalid JSON format")?;
-                    let reply = match (
-                        cmd.get("method"),
-                        cmd.get("params").unwrap_or_else(|| &empty_params),
-                        cmd.get("id"),
-                    ) {
-                        (
-                            Some(&Value::String(ref method)),
-                            &Value::Array(ref params),
-                            Some(ref id),
-                        ) => self.handle_command(method, params, id)?,
+                    let reply = match cmd {
+                        Array(cmds) => self.handle_batch(&cmds)?,
+                        Object(_) => self.extract_and_handle_command(&cmd)?,
                         _ => bail!("invalid command: {}", cmd),
                     };
                     self.send_values(&[reply])?
