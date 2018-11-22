@@ -53,8 +53,17 @@ impl fmt::Display for AddressError {
 ///
 /// The main point of this newtype is to provide better description than what `String` type
 /// provides.
-#[derive(Deserialize)]
+#[derive(Deserialize,Debug,Clone)]
 pub struct ResolvAddr(String);
+
+impl ResolvAddr {
+
+    fn new(ip: [u8; 4], port: i32) -> ResolvAddr {
+        ResolvAddr {
+            0: format!("{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port)
+        }
+    }
+}
 
 impl ::configure_me::parse_arg::ParseArg for ResolvAddr {
     type Error = InvalidUtf8;
@@ -74,7 +83,7 @@ impl ::configure_me::parse_arg::ParseArg for ResolvAddr {
 
 impl ResolvAddr {
     /// Resolves the address.
-    fn resolve(self) -> std::result::Result<SocketAddr, AddressError> {
+    pub fn resolve(self) -> std::result::Result<SocketAddr, AddressError> {
         match self.0.to_socket_addrs() {
             Ok(mut iter) => iter.next().ok_or_else(|| AddressError::NoAddrError(self.0)),
             Err(err) => Err(AddressError::ResolvError { addr: self.0, err }),
@@ -128,7 +137,7 @@ pub struct Config {
     pub network_type: Network,
     pub db_path: PathBuf,
     pub daemon_dir: PathBuf,
-    pub daemon_rpc_addr: SocketAddr,
+    pub daemon_rpc_addr: ResolvAddr,
     pub cookie: Option<String>,
     pub electrum_rpc_addr: SocketAddr,
     pub monitoring_addr: SocketAddr,
@@ -194,9 +203,8 @@ impl Config {
             Network::Regtest => 24224,
         };
 
-        let daemon_rpc_addr: SocketAddr = config.daemon_rpc_addr.map_or(
-            (DEFAULT_SERVER_ADDRESS, default_daemon_port).into(),
-            ResolvAddr::resolve_or_exit,
+        let daemon_rpc_addr: ResolvAddr = config.daemon_rpc_addr.unwrap_or(
+            ResolvAddr::new(DEFAULT_SERVER_ADDRESS, default_daemon_port)
         );
         let electrum_rpc_addr: SocketAddr = config.electrum_rpc_addr.map_or(
             (DEFAULT_SERVER_ADDRESS, default_electrum_port).into(),

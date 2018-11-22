@@ -11,7 +11,7 @@ use hex;
 use serde_json::{from_str, from_value, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Lines, Write};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ use crate::errors::*;
 use crate::metrics::{HistogramOpts, HistogramVec, Metrics};
 use crate::signal::Waiter;
 use crate::util::HeaderList;
+use crate::config::ResolvAddr;
 
 fn parse_hash(value: &Value) -> Result<Sha256dHash> {
     Ok(Sha256dHash::from_hex(
@@ -151,7 +152,7 @@ struct Connection {
     tx: TcpStream,
     rx: Lines<BufReader<TcpStream>>,
     cookie_getter: Arc<dyn CookieGetter>,
-    addr: SocketAddr,
+    addr: ResolvAddr,
     signal: Waiter,
 }
 
@@ -170,26 +171,32 @@ fn tcp_connect(addr: SocketAddr, signal: &Waiter) -> Result<TcpStream> {
 
 impl Connection {
     fn new(
-        addr: SocketAddr,
+        addr: &ResolvAddr,
         cookie_getter: Arc<dyn CookieGetter>,
-        signal: Waiter,
+        signal: Waiter
     ) -> Result<Connection> {
-        let conn = tcp_connect(addr, &signal)?;
+        let resolved_addr = addr
+            .to_owned()
+            .resolve()
+            .map_err(|_| ErrorKind::Connection("failed to resolve addr".to_owned()))?;
+
+        let conn = tcp_connect(resolved_addr, &signal)?;
         let reader = BufReader::new(
             conn.try_clone()
                 .chain_err(|| format!("failed to clone {:?}", conn))?,
         );
+
         Ok(Connection {
             tx: conn,
             rx: reader.lines(),
             cookie_getter,
-            addr,
+            addr: addr.to_owned(),
             signal,
         })
     }
 
     fn reconnect(&self) -> Result<Connection> {
-        Connection::new(self.addr, self.cookie_getter.clone(), self.signal.clone())
+        Connection::new(&self.addr, self.cookie_getter.clone(), self.signal.clone())
     }
 
     fn send(&mut self, request: &str) -> Result<()> {
@@ -299,7 +306,7 @@ pub struct Daemon {
 impl Daemon {
     pub fn new(
         daemon_dir: &PathBuf,
-        daemon_rpc_addr: SocketAddr,
+        daemon_rpc_addr: ResolvAddr,
         cookie_getter: Arc<dyn CookieGetter>,
         network: Network,
         signal: Waiter,
@@ -310,7 +317,7 @@ impl Daemon {
             daemon_dir: daemon_dir.clone(),
             network,
             conn: Mutex::new(Connection::new(
-                daemon_rpc_addr,
+                &daemon_rpc_addr,
                 cookie_getter,
                 signal.clone(),
             )?),
