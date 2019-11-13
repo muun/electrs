@@ -577,6 +577,8 @@ impl RPC {
                         conn.run();
                         info!("[{}] disconnected peer", addr);
                     }));
+
+                    info!("Children count = {}", children.len());
                 }
                 trace!("closing {} RPC connections", senders.lock().unwrap().len());
                 for sender in senders.lock().unwrap().iter() {
