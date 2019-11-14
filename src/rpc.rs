@@ -504,15 +504,15 @@ struct Stats {
 impl RPC {
     fn start_notifier(
         notification: Channel<Notification>,
-        senders: Arc<Mutex<Vec<SyncSender<Message>>>>,
+        senders: Arc<Mutex<HashMap<i32, SyncSender<Message>>>>,
         acceptor: Sender<Option<(TcpStream, SocketAddr)>>,
     ) {
         spawn_thread("notification", move || {
             for msg in notification.receiver().iter() {
-                let mut senders = senders.lock().unwrap();
+                let senders = senders.lock().unwrap();
                 match msg {
                     Notification::Periodic => {
-                        for sender in senders.deref() {
+                        for sender in senders.values() {
                             let _ = sender.try_send(Message::PeriodicUpdate);
                         }
                     }
@@ -555,35 +555,63 @@ impl RPC {
             )),
         });
         let notification = Channel::unbounded();
+
         RPC {
             notification: notification.sender(),
             server: Some(spawn_thread("rpc", move || {
-                let senders = Arc::new(Mutex::new(Vec::<SyncSender<Message>>::new()));
+                let senders = Arc::new(Mutex::new(HashMap::<i32, SyncSender<Message>>::new()));
+                let handles = Arc::new(Mutex::new(HashMap::new()));
+
                 let acceptor = RPC::start_acceptor(addr);
                 RPC::start_notifier(notification, senders.clone(), acceptor.sender());
-                let mut children = vec![];
-                while let Some((stream, addr)) = acceptor.receiver().recv().unwrap() {
-                    let query = query.clone();
-                    let senders = senders.clone();
-                    let stats = stats.clone();
-                    children.push(spawn_thread("peer", move || {
-                        info!("[{}] connected peer", addr);
-                        let conn = Connection::new(query, stream, addr, stats);
-                        senders.lock().unwrap().push(conn.chan.sender());
-                        conn.run();
-                        info!("[{}] disconnected peer", addr);
-                    }));
 
-                    info!("Children count = {}", children.len());
+                let mut handle_count = 0;
+                while let Some((stream, addr)) = acceptor.receiver().recv().unwrap() {
+                    let handle_id = handle_count.to_owned();
+                    handle_count += 1;
+
+                    let handle: thread::JoinHandle<()>;
+
+                    // explicitely scope the shadowed variables for the new thread
+                    {
+                        let query = query.clone();
+                        let senders = senders.clone();
+                        let stats = stats.clone();
+                        let handles = handles.clone();
+
+                        handle = spawn_thread("peer", move || {
+                            info!("[{}] connected peer", addr);
+                            let conn = Connection::new(query, stream, addr, stats);
+                            senders.lock().unwrap().insert(handle_id, conn.chan.sender());
+                            conn.run();
+                            info!("[{}] disconnected peer", addr);
+
+                            senders.lock().unwrap().remove(&handle_id);
+                            handles.lock().unwrap().remove(&handle_id);
+                        });
+                    }
+
+                    handles.lock().unwrap().insert(handle_id, Some(handle));
+
+                    info!("Children count = {}", handles.lock().unwrap().len());
                 }
                 trace!("closing {} RPC connections", senders.lock().unwrap().len());
-                for sender in senders.lock().unwrap().iter() {
+                for sender in senders.lock().unwrap().values() {
                     let _ = sender.send(Message::Done);
                 }
-                trace!("waiting for {} RPC handling threads", children.len());
-                for child in children {
-                    let _ = child.join();
+
+                trace!("waiting for {} RPC handling threads", handles.lock().unwrap().len());
+                let mut owned_handles= vec![];
+                for (_, handle) in handles.lock().unwrap().iter_mut() {
+                   owned_handles.push(handle.take());
                 }
+
+                for handle in owned_handles {
+                    if let Some(handle) = handle {
+                        let _ = handle.join();
+                    }
+                }
+
                 trace!("RPC connections are closed");
             })),
         }
