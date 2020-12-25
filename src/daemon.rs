@@ -108,6 +108,7 @@ struct BlockchainInfo {
     bestblockhash: String,
     pruned: bool,
     initialblockdownload: bool,
+    verificationprogress: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -348,7 +349,11 @@ impl Daemon {
             bail!("pruned node is not supported (use '-prune=0' bitcoind flag)".to_owned())
         }
         loop {
-            if !daemon.getblockchaininfo()?.initialblockdownload {
+            let info = daemon.getblockchaininfo()?;
+            if !info.initialblockdownload {
+                break;
+            }
+            if info.verificationprogress == 1. && info.blocks == info.headers {
                 break;
             }
             warn!("wait until bitcoind is synced (i.e. initialblockdownload = false)");
